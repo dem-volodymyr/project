@@ -1,0 +1,52 @@
+version: '3'
+
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - DEBUG=True
+      - SECRET_KEY=django-insecure-t^5(e(hk(03a1far(dxe8q%ov(712x6yln4_dt9c((h^_3)18g
+    restart: always
+
+  sonarqube:
+    image: sonarqube:latest
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_extensions:/opt/sonarqube/extensions
+    environment:
+      - SONAR_JDBC_URL=jdbc:h2:mem:sonarqube
+      - SONAR_JDBC_USERNAME=sonar
+      - SONAR_JDBC_PASSWORD=sonar
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      memlock:
+        soft: -1
+        hard: -1
+    restart: always
+    mem_limit: 2g
+
+  sonarscanner:
+    image: sonarsource/sonar-scanner-cli:latest
+    depends_on:
+      - sonarqube
+    volumes:
+      - .:/usr/src
+    environment:
+      - SONAR_HOST_URL=http://sonarqube:9000
+    command: ["sleep", "infinity"]
+
+volumes:
+  sonarqube_data:
+  sonarqube_logs:
+  sonarqube_extensions:
+

@@ -1,0 +1,6 @@
+django==5.0.3
+djangorestframework
+drf-spectacular
+coverage
+pytest
+pytest-django

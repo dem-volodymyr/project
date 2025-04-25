@@ -1,9 +1,16 @@
+"""
+Serializers for the slot machine application.
+"""
+import decimal
 from rest_framework import serializers
-from .models import Player, Game, Spin, Symbol
 from django.contrib.auth.models import User
+
+from .models import Player, Game, Spin, Symbol
 
 
 class UserSerializer(serializers.ModelSerializer):
+    """Serializer for User model."""
+
     class Meta:
         model = User
         fields = ['id', 'username', 'email']
@@ -11,6 +18,8 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class PlayerSerializer(serializers.ModelSerializer):
+    """Serializer for Player model."""
+
     user = UserSerializer(read_only=True)
 
     class Meta:
@@ -20,12 +29,16 @@ class PlayerSerializer(serializers.ModelSerializer):
 
 
 class SymbolSerializer(serializers.ModelSerializer):
+    """Serializer for Symbol model."""
+
     class Meta:
         model = Symbol
-        fields = ['id', 'name', 'image_path']
+        fields = ['id', 'name', 'image_path', 'payout_multiplier']
 
 
 class SpinSerializer(serializers.ModelSerializer):
+    """Serializer for Spin model."""
+
     class Meta:
         model = Spin
         fields = ['id', 'game', 'bet_amount', 'payout', 'result', 'win_data', 'timestamp']
@@ -33,6 +46,8 @@ class SpinSerializer(serializers.ModelSerializer):
 
 
 class GameSerializer(serializers.ModelSerializer):
+    """Serializer for Game model."""
+
     spins = SpinSerializer(many=True, read_only=True)
 
     class Meta:
@@ -42,10 +57,14 @@ class GameSerializer(serializers.ModelSerializer):
 
 
 class SpinRequestSerializer(serializers.Serializer):
-    bet_size = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0.01)
+    """Serializer for spin request data."""
+
+    bet_size = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=decimal.Decimal('0.01'))
 
 
 class RegistrationSerializer(serializers.ModelSerializer):
+    """Serializer for user registration."""
+
     password = serializers.CharField(write_only=True)
 
     class Meta:
@@ -53,6 +72,7 @@ class RegistrationSerializer(serializers.ModelSerializer):
         fields = ['username', 'email', 'password']
 
     def create(self, validated_data):
+        """Create a new user and player profile."""
         user = User.objects.create_user(
             username=validated_data['username'],
             email=validated_data.get('email', ''),

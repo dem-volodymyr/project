@@ -1,14 +1,18 @@
+"""
+API views for the slot machine application.
+"""
 from rest_framework import viewsets, status, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
+
 from .models import Player, Game, Spin, Symbol
 from .serializers import (
     PlayerSerializer, GameSerializer, SpinSerializer,
     SymbolSerializer, SpinRequestSerializer, RegistrationSerializer
 )
-from .services import SlotMachineService
+from .factories import ServiceFactory
 
 
 class RegistrationView(generics.CreateAPIView):
@@ -25,7 +29,7 @@ class RegistrationView(generics.CreateAPIView):
         user = serializer.save()
 
         # Return the player data for the newly created user
-        player = Player.objects.get(user=user)
+        player, created = Player.objects.get_or_create(user=user)
         return Response(
             PlayerSerializer(player).data,
             status=status.HTTP_201_CREATED
@@ -45,7 +49,7 @@ class PlayerViewSet(viewsets.ReadOnlyModelViewSet):
     )
     @action(detail=False, methods=['get'])
     def me(self, request):
-        player = Player.objects.get(user=request.user)
+        player, created = Player.objects.get_or_create(user=request.user)
         serializer = self.get_serializer(player)
         return Response(serializer.data)
 
@@ -69,13 +73,26 @@ class SpinViewSet(viewsets.GenericViewSet):
     )
     @action(detail=False, methods=['post'])
     def spin(self, request):
+        """Spin the slot machine."""
         serializer = SpinRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         bet_size = serializer.validated_data['bet_size']
-        player = Player.objects.get(user=request.user)
+        player, created = Player.objects.get_or_create(user=request.user)
 
-        slot_machine = SlotMachineService()
+        # Create services using the factory
+        def get_symbol(name):
+            return Symbol.objects.get(name=name)
+
+        symbols = Symbol.objects.all()
+        services = ServiceFactory.create_services(
+            symbols=symbols,
+            symbol_provider=get_symbol,
+            spin_model=Spin,
+            game_model=Game
+        )
+
+        slot_machine = services['slot_machine_service']
         result = slot_machine.play_spin(player, bet_size)
 
         if not result['success']:
@@ -93,7 +110,7 @@ class SpinViewSet(viewsets.GenericViewSet):
     )
     @action(detail=False, methods=['get'])
     def history(self, request):
-        player = Player.objects.get(user=request.user)
+        player, created = Player.objects.get_or_create(user=request.user)
         games = Game.objects.filter(player=player)
         spins = Spin.objects.filter(game__in=games).order_by('-timestamp')
 

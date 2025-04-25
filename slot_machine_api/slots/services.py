@@ -1,140 +1,240 @@
+"""
+Service classes for the slot machine application.
+"""
 import random
 from decimal import Decimal
+from typing import List, Dict, Optional, Any, Sequence, cast
+
+from django.db import transaction
+from django.core.cache import cache
+
+from .constants import DEFAULT_NUM_REELS, DEFAULT_VISIBLE_ROWS, MIN_MATCHING_SYMBOLS
+from .interfaces import IReelService, ISlotMachineService, SymbolProvider, ReelResult, WinData, SymbolName
+from .models import SpinConfig, SpinResult, SpinResponse
+from .utils import find_longest_sequence, transpose_matrix
+from .strategies import create_default_win_strategy
 
 
-class ReelService:
-    def __init__(self, symbols):
+class ReelGenerator:
+    """Responsible for generating random reel results."""
+
+    def __init__(self, symbols: Sequence[SymbolProvider]):
+        """
+        Initialize the reel generator.
+
+        Args:
+            symbols: Collection of symbols to use for generation
+        """
         self.symbols = symbols
 
-    def generate_spin(self, num_reels=5, visible_rows=3):
-        """Generate a random spin result with 5 reels and 3 visible symbols per reel."""
+    def generate_spin(self, config: SpinConfig) -> ReelResult:
+        """
+        Generate a random spin result.
+
+        Args:
+            config: Configuration for the spin
+
+        Returns:
+            A dictionary mapping reel indices to lists of symbol names
+        """
         result = {}
-        for reel in range(num_reels):
+        for reel in range(config.num_reels):
             # Select random symbols for this reel
             shuffled_symbols = random.sample(list(self.symbols), len(self.symbols))
-            result[reel] = [shuffled_symbols[i].name for i in range(visible_rows)]
+            result[reel] = [shuffled_symbols[i].name for i in range(config.visible_rows)]
         return result
 
-    @staticmethod
-    def flip_horizontal(result):
-        """Convert vertical reels to horizontal rows for win checking."""
-        horizontal_values = []
-        for value in result.values():
-            horizontal_values.append(value)
 
-        rows, cols = len(horizontal_values), len(horizontal_values[0])
-        hvals2 = [[""] * rows for _ in range(cols)]
+class PayoutCalculator:
+    """Responsible for calculating payouts based on win data."""
 
-        for x in range(rows):
-            for y in range(cols):
-                hvals2[y][rows - x - 1] = horizontal_values[x][y]
+    def __init__(self, symbol_provider: Any):
+        """
+        Initialize the payout calculator.
 
-        hvals3 = [item[::-1] for item in hvals2]
-        return hvals3
+        Args:
+            symbol_provider: A function or object that can retrieve symbol data
+        """
+        self.symbol_provider = symbol_provider
 
-    @staticmethod
-    def longest_seq(hit):
-        """Find the longest sequence of consecutive indices."""
-        sub_seq_length, longest = 1, 1
-        start, end = 0, 0
+    def calculate_payout(self, win_data: Optional[WinData], bet_size: Decimal) -> Decimal:
+        """
+        Calculate payout based on win data and bet size.
 
-        for i in range(len(hit) - 1):
-            if hit[i] == hit[i + 1] - 1:
-                sub_seq_length += 1
-                if sub_seq_length > longest:
-                    longest = sub_seq_length
-                    start = i + 2 - sub_seq_length
-                    end = i + 2
-            else:
-                sub_seq_length = 1
+        Args:
+            win_data: The win data to calculate payout for
+            bet_size: The bet size for this spin
 
-        return hit[start:end]
-
-    def check_wins(self, result):
-        """Check for winning combinations in the spin result."""
-        hits = {}
-        horizontal = self.flip_horizontal(result)
-
-        for row in horizontal:
-            for sym in row:
-                if row.count(sym) > 2:  # Potential win
-                    possible_win = [idx for idx, val in enumerate(row) if sym == val]
-
-                    # Check possible_win for a subsequence longer than 2 and add to hits
-                    longest = self.longest_seq(possible_win)
-                    if len(longest) > 2:
-                        hits[horizontal.index(row) + 1] = [sym, longest]
-
-        return hits if hits else None
-
-    def calculate_payout(self, win_data, bet_size):
-        """Calculate payout based on win data and bet size."""
+        Returns:
+            The calculated payout amount
+        """
         if not win_data:
             return Decimal('0.00')
 
-        from .models import Symbol
         total_payout = Decimal('0.00')
 
         for row_number, win_info in win_data.items():
             sym_name, indices = win_info
-            symbol = Symbol.objects.get(name=sym_name)
+            symbol = self.symbol_provider(name=sym_name)
             combo_length = len(indices)
             total_payout += Decimal(bet_size) * combo_length * symbol.payout_multiplier
 
         return total_payout
 
 
-class SlotMachineService:
-    def __init__(self):
-        from .models import Symbol
-        symbols = Symbol.objects.all()
-        self.reel_service = ReelService(symbols)
+class ReelService(IReelService):
+    """Service for reel operations."""
 
-    def play_spin(self, player, bet_size):
-        """Process a single spin of the slot machine."""
+    def __init__(self, symbols: Sequence[SymbolProvider], symbol_provider: Any):
+        """
+        Initialize the reel service.
+
+        Args:
+            symbols: Collection of symbols to use for generation
+            symbol_provider: Function to retrieve symbol data by name
+        """
+        self.generator = ReelGenerator(symbols)
+        self.win_strategy = create_default_win_strategy()
+        self.payout_calculator = PayoutCalculator(symbol_provider)
+
+    def generate_spin(self, num_reels: int = DEFAULT_NUM_REELS, 
+                     visible_rows: int = DEFAULT_VISIBLE_ROWS) -> ReelResult:
+        """
+        Generate a random spin result.
+
+        Args:
+            num_reels: Number of reels to generate
+            visible_rows: Number of visible symbols per reel
+
+        Returns:
+            A dictionary mapping reel indices to lists of symbol names
+        """
+        config = SpinConfig(num_reels=num_reels, visible_rows=visible_rows)
+        return self.generator.generate_spin(config)
+
+    def flip_horizontal(self, result: ReelResult) -> List[List[SymbolName]]:
+        """
+        Convert vertical reels to horizontal rows for win checking.
+
+        Args:
+            result: The spin result with vertical reels
+
+        Returns:
+            A list of horizontal rows
+        """
+        # Extract values from the result dictionary
+        reels = []
+        for i in range(len(result)):
+            reels.append(result[i])
+
+        # Transpose the matrix to get horizontal rows
+        return transpose_matrix(reels)
+
+    def check_wins(self, result: ReelResult) -> Optional[WinData]:
+        """
+        Check for winning combinations in the spin result.
+
+        Args:
+            result: The spin result to check
+
+        Returns:
+            Win data if there are wins, None otherwise
+        """
+        win_data = self.win_strategy.check_wins(result)
+        return win_data if win_data else None
+
+    def calculate_payout(self, win_data: Optional[WinData], bet_size: Decimal) -> Decimal:
+        """
+        Calculate payout based on win data and bet size.
+
+        Args:
+            win_data: The win data to calculate payout for
+            bet_size: The bet size for this spin
+
+        Returns:
+            The calculated payout amount
+        """
+        return self.payout_calculator.calculate_payout(win_data, bet_size)
+
+
+class SlotMachineService(ISlotMachineService):
+    """Service for slot machine operations."""
+
+    def __init__(self, reel_service: IReelService, spin_model: Any, game_model: Any):
+        """
+        Initialize the slot machine service.
+
+        Args:
+            reel_service: Service for reel operations
+            spin_model: Model class for spins
+            game_model: Model class for games
+        """
+        self.reel_service = reel_service
+        self.spin_model = spin_model
+        self.game_model = game_model
+
+    @transaction.atomic
+    def play_spin(self, player: Any, bet_size: Decimal) -> Dict[str, Any]:
+        """
+        Process a single spin of the slot machine.
+
+        Args:
+            player: The player making the spin
+            bet_size: The bet size for this spin
+
+        Returns:
+            A dictionary with the spin result
+        """
         # Check if player has enough balance
         if player.balance < Decimal(bet_size):
-            return {
-                'success': False,
-                'message': 'Insufficient balance'
-            }
+            return SpinResponse(
+                success=False,
+                message='Insufficient balance'
+            ).__dict__
 
         # Update player balance
         player.balance -= Decimal(bet_size)
         player.total_wager += Decimal(bet_size)
         player.save()
 
-        # Generate spin result
-        result = self.reel_service.generate_spin()
+        try:
+            # Generate spin result
+            result = self.reel_service.generate_spin()
 
-        # Check for wins
-        win_data = self.reel_service.check_wins(result)
-        payout = Decimal('0.00')
+            # Check for wins
+            win_data = self.reel_service.check_wins(result)
+            payout = Decimal('0.00')
 
-        # Calculate and process payout if there's a win
-        if win_data:
-            payout = self.reel_service.calculate_payout(win_data, bet_size)
-            player.balance += payout
-            player.total_won += payout
-            player.save()
+            # Calculate and process payout if there's a win
+            if win_data:
+                payout = self.reel_service.calculate_payout(win_data, bet_size)
+                player.balance += payout
+                player.total_won += payout
+                player.save()
 
-        # Create and return the spin record
-        from .models import Spin, Game
-        game, _ = Game.objects.get_or_create(player=player)
+            # Create and return the spin record
+            game, _ = self.game_model.objects.get_or_create(player=player)
 
-        spin = Spin.objects.create(
-            game=game,
-            bet_amount=bet_size,
-            payout=payout,
-            result=result,
-            win_data=win_data
-        )
+            spin = self.spin_model.objects.create(
+                game=game,
+                bet_amount=bet_size,
+                payout=payout,
+                result=result,
+                win_data=win_data
+            )
 
-        return {
-            'success': True,
-            'spin_id': spin.id,
-            'result': result,
-            'win_data': win_data,
-            'payout': payout,
-            'current_balance': player.balance
-        }
+            return SpinResponse(
+                success=True,
+                spin_id=str(spin.id),
+                result=result,
+                win_data=win_data,
+                payout=payout,
+                current_balance=player.balance
+            ).__dict__
+
+        except Exception as e:
+            # Rollback is automatic due to transaction.atomic
+            return SpinResponse(
+                success=False,
+                message=f"Error processing spin: {str(e)}"
+            ).__dict__
